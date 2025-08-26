@@ -1,89 +1,67 @@
-from itertools import repeat
-import collections.abc
+import torch 
+import torch.nn as nn
+import torch.nn.functional as F
+import math 
+import os 
 
-import torch
-from torch import nn as nn
-from torchvision.ops.misc import FrozenBatchNorm2d
+def temperature_scaled_softmax(logits, temperature):
+        return F.softmax(logits / temperature, dim=-1)
 
-
-def freeze_batch_norm_2d(module, module_match={}, name=''):
+def get_pseudo_labels(logits, preds, pseudo_label_vec, label_vec, P):
     """
-    Converts all `BatchNorm2d` and `SyncBatchNorm` layers of provided module into `FrozenBatchNorm2d`. If `module` is
-    itself an instance of either `BatchNorm2d` or `SyncBatchNorm`, it is converted into `FrozenBatchNorm2d` and
-    returned. Otherwise, the module is walked recursively and submodules are converted in place.
-
-    Args:
-        module (torch.nn.Module): Any PyTorch module.
-        module_match (dict): Dictionary of full module names to freeze (all if empty)
-        name (str): Full module name (prefix)
-
-    Returns:
-        torch.nn.Module: Resulting module
-
-    Inspired by https://github.com/pytorch/pytorch/blob/a5895f85be0f10212791145bfedc0261d364f103/torch/nn/modules/batchnorm.py#L762
+    Function to generate pseudo-label for multi-label learning:
+        logits: (batch_size * (grid_size* grid_size + 1), num_classes) contains logits from CLIP of global and local images with their labels
+        preds: (batch_size, num_classes) current predictions of model
+        label_vec: (batch_size, num_classes), contain only a single positive label = 1, other = 0
     """
-    res = module
-    is_match = True
-    if module_match:
-        is_match = name in module_match
-    if is_match and isinstance(module, (nn.modules.batchnorm.BatchNorm2d, nn.modules.batchnorm.SyncBatchNorm)):
-        res = FrozenBatchNorm2d(module.num_features)
-        res.num_features = module.num_features
-        res.affine = module.affine
-        if module.affine:
-            res.weight.data = module.weight.data.clone().detach()
-            res.bias.data = module.bias.data.clone().detach()
-        res.running_mean.data = module.running_mean.data
-        res.running_var.data = module.running_var.data
-        res.eps = module.eps
-    else:
-        for child_name, child in module.named_children():
-            full_child_name = '.'.join([name, child_name]) if name else child_name
-            new_child = freeze_batch_norm_2d(child, module_match, full_child_name)
-            if new_child is not child:
-                res.add_module(child_name, new_child)
-    return res
+    batch_size = int(logits.shape[0]) // (P['grid_size'] * P['grid_size'] + 1)
 
+    similarity = temperature_scaled_softmax(logits, P['temp'])
+    sim_global = similarity[0:batch_size] # score of global region
+    sim_locals = torch.chunk(similarity[batch_size:], P['grid_size'] * P['grid_size'], dim=0) 
+    sim_locals = torch.stack(sim_locals, dim=0) # score of local regions
+    sim_locals = sim_locals.permute(1, 0, 2) # shape: (batch_size, num_locals, num_classes)
+    alpha = torch.max(sim_locals, dim=1)[0]
+    beta = torch.min(sim_locals, dim=1)[0]
+    avg = torch.mean(sim_locals, dim=1)
+    single_pos_pro = torch.max(sim_global * label_vec, dim=1)[0]
+    # eta = P['eta'] 
+    eta = torch.minimum(single_pos_pro, torch.tensor(P['eta']))
+    eta = eta.unsqueeze(1).repeat(1, P['num_classes'])
 
-# From PyTorch internals
-def _ntuple(n):
-    def parse(x):
-        if isinstance(x, collections.abc.Iterable):
-            return x
-        return tuple(repeat(x, n))
-    return parse
+    # gamma_i = 1 if alpha_i > eta else 0
+    gamma = torch.where(alpha > eta, torch.tensor(1).to(P['device']), torch.tensor(0).to(P['device'])) 
+    sim_ag = alpha * gamma + beta * (1 - gamma)
+    sim_final = 1/ 2 * (sim_global + sim_ag)
 
+    sim = 1 / 2 * (sim_global + avg)
+    
+    # define pseudo labels
+    pseudo_labels = torch.zeros_like(sim_final)
+    #positive pseudo label
+    scalar_pos = torch.tensor(1, dtype=torch.float32).to(P['device'])
+    # Choose labels with top-k highest scores and greater than threshold
+    # Get the top-k indices and values for each sample in the batch
+    values, indices = torch.topk(sim_final, k=P['top_k'], dim=1) # change
+    
+    # Create a mask for values greater than the threshold
+    mask = values >= P['threshold']
+    
+    # Initialize the pseudo labels tensor with zeros
+    pseudo_labels = torch.zeros_like(sim_final, dtype=torch.int)
+    
+    # Use the mask to set the appropriate positions to 1
+    pseudo_labels.scatter_(1, indices, mask.int()) 
 
-to_1tuple = _ntuple(1)
-to_2tuple = _ntuple(2)
-to_3tuple = _ntuple(3)
-to_4tuple = _ntuple(4)
-to_ntuple = lambda n, x: _ntuple(n)(x)
+    acc_pseudo_labels = pseudo_labels.clone()
+    acc_pseudo_labels = torch.where(pseudo_label_vec==0, acc_pseudo_labels, pseudo_label_vec)
 
-# Replaces all linear layers with linear_replacement
-# TODO: add int8 support for other linear layers including attn and convnets
-def replace_linear(model, linear_replacement, include_modules=['c_fc', 'c_proj'], copy_weights=True):
-    for name, module in model.named_children():
-        if len(list(module.children())) > 0:
-            replace_linear(module, linear_replacement, include_modules, copy_weights)
+    # Use 10% of low-confidence of labels to be negative peseudo-labels 
+    num_negatives = int(P['negative_ratio'] * P['num_classes'])
+    if num_negatives > 0:
+        _, neg_indices = torch.topk(sim, k=num_negatives, largest=False, dim=1)
+        # Set negative pseudo-labels for these indices
+        pseudo_labels.scatter_(-1, neg_indices, torch.zeros_like(neg_indices, dtype=torch.int))
 
-        if isinstance(module, torch.nn.Linear) and name in include_modules:
-            old_module = model._modules[name]
-            model._modules[name] = linear_replacement(
-                module.in_features,
-                module.out_features,
-                module.bias is not None,
-            )
-            if copy_weights:
-                model._modules[name].weight.data.copy_(old_module.weight.data)
-                if model._modules[name].bias is not None:
-                    model._modules[name].bias.data.copy_(old_module.bias)
+    return acc_pseudo_labels, pseudo_labels
 
-    return model
-
-def convert_int8_model_to_inference_mode(model):
-    for m in model.modules():
-        if hasattr(m, 'prepare_for_eval'):
-            int8_original_dtype = m.weight.dtype
-            m.prepare_for_eval()
-            m.int8_original_dtype = int8_original_dtype
