@@ -1,0 +1,1 @@
+python main.py --dataset "pascal" --use_config_file True

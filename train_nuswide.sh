@@ -1,0 +1,1 @@
+python main.py --dataset "nuswide" --use_config_file True
