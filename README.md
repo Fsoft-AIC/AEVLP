@@ -1,4 +1,4 @@
-# More Reliable Pseudo-labels, Better Performance: A Generalized Approach to Single Positive Multi-label Learning (ICCV 2025) | [Paper](https://iccv.thecvf.com/virtual/2025/poster/1755)
+# More Reliable Pseudo-labels, Better Performance: A Generalized Approach to Single Positive Multi-label Learning (ICCV 2025) | [Paper](https://arxiv.org/abs/2508.20381)
 
 Primary contact : [luongtk@fpt.com](luongtk@fpt.com)
 
