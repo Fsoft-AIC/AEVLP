@@ -32,7 +32,7 @@ pip install -r requirements.txt
 ## Dataset Preparation
 Our main experiments use four datasets: COCO, CUB, NUS-WIDE, and PASCAL VOC.
 
-See the instructions in the [Data File](https://github.com/snucml/LargeLossMatters/blob/main/data/README.md) of the [LargeLossMatters](https://github.com/snucml/LargeLossMatters/tree/main) repository for manually downloading and setting up the datasets, or simply download the processed data from our [SPMLData](https://huggingface.co/datasets/moneyzz432/spml-dataset/tree/main) and place them in the `data` folder.  
+See the instructions in the [Data File](https://github.com/snucml/LargeLossMatters/blob/main/data/README.md) of the [LargeLossMatters](https://github.com/snucml/LargeLossMatters/tree/main) repository for manually downloading and setting up the datasets, or simply download the processed data from our [SPMLData](https://huggingface.co/datasets/moneyzz432/AEVLP-Dataset) and place them in the `data` folder.  
 
 Once you have finished setting up the data, please configure the dataset paths (or other data-related settings) in the files `config.py` and `datasets.py`.
 
